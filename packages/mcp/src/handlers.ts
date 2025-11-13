@@ -206,13 +206,40 @@ export class ToolHandlers {
 
             // Check if already indexed (unless force is true)
             if (!forceReindex && this.snapshotManager.getIndexedCodebases().includes(absolutePath)) {
-                return {
-                    content: [{
-                        type: "text",
-                        text: `Codebase '${absolutePath}' is already indexed. Use force=true to re-index.`
-                    }],
-                    isError: true
-                };
+                // Instead of returning error, try incremental reindex using Merkle tree
+                console.log(`[INCREMENTAL-INDEX] 🔍 Checking for changes using Merkle tree: ${absolutePath}`);
+                try {
+                    const changes = await this.context.reindexByChange(absolutePath);
+
+                    if (changes.added === 0 && changes.removed === 0 && changes.modified === 0) {
+                        console.log(`[INCREMENTAL-INDEX] ✅ No changes detected`);
+                        return {
+                            content: [{
+                                type: "text",
+                                text: `Codebase '${absolutePath}' is up to date. No changes detected.`
+                            }],
+                            isError: false
+                        };
+                    }
+
+                    console.log(`[INCREMENTAL-INDEX] ✅ Changes detected and indexed: +${changes.added} ~${changes.modified} -${changes.removed} files`);
+                    return {
+                        content: [{
+                            type: "text",
+                            text: `Incremental reindex completed for '${absolutePath}'.\nAdded: ${changes.added} files, Modified: ${changes.modified} files, Removed: ${changes.removed} files`
+                        }],
+                        isError: false
+                    };
+                } catch (error: any) {
+                    console.error(`[INCREMENTAL-INDEX] ❌ Incremental reindex failed:`, error);
+                    return {
+                        content: [{
+                            type: "text",
+                            text: `Error during incremental reindex: ${error.message || error}. Use force=true for full reindex.`
+                        }],
+                        isError: true
+                    };
+                }
             }
 
             // If force reindex and codebase is already indexed, remove it
