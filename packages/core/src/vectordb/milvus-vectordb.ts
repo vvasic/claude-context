@@ -20,16 +20,38 @@ export interface MilvusConfig {
 
 
 
+export interface MilvusMemoryConfig {
+    idleTimeoutMinutes?: number;  // Default: 5 minutes
+    releaseOnShutdown?: boolean;  // Default: true
+}
+
 export class MilvusVectorDatabase implements VectorDatabase {
     protected config: MilvusConfig;
     private client: MilvusClient | null = null;
     protected initializationPromise: Promise<void>;
 
-    constructor(config: MilvusConfig) {
+    // Memory management
+    private lastAccessTime: Map<string, number> = new Map();
+    private idleTimeoutMs: number;
+    private idleCheckInterval: NodeJS.Timeout | null = null;
+    private releaseOnShutdown: boolean;
+    private shutdownHooksRegistered: boolean = false;
+
+    constructor(config: MilvusConfig, memoryConfig?: MilvusMemoryConfig) {
         this.config = config;
+
+        // Memory management config
+        this.idleTimeoutMs = (memoryConfig?.idleTimeoutMinutes ?? 5) * 60 * 1000;
+        this.releaseOnShutdown = memoryConfig?.releaseOnShutdown ?? true;
 
         // Start initialization asynchronously without waiting
         this.initializationPromise = this.initialize();
+
+        // Start memory management
+        this.startIdleChecker();
+        if (this.releaseOnShutdown) {
+            this.registerShutdownHooks();
+        }
     }
 
     private async initialize(): Promise<void> {
@@ -102,6 +124,128 @@ export class MilvusVectorDatabase implements VectorDatabase {
             console.error(`[MilvusDB] ❌ Failed to ensure collection '${collectionName}' is loaded:`, error);
             throw error;
         }
+    }
+
+    /**
+     * Start background checker for idle collections
+     */
+    private startIdleChecker(): void {
+        // Check every minute for idle collections
+        this.idleCheckInterval = setInterval(async () => {
+            await this.releaseIdleCollections();
+        }, 60 * 1000);
+
+        // Don't prevent process exit
+        if (this.idleCheckInterval.unref) {
+            this.idleCheckInterval.unref();
+        }
+
+        console.log(`[MilvusDB] ⏱️  Idle collection checker started (timeout: ${this.idleTimeoutMs / 60000} minutes)`);
+    }
+
+    /**
+     * Register shutdown hooks to release collections on exit
+     */
+    private registerShutdownHooks(): void {
+        if (this.shutdownHooksRegistered) return;
+
+        const cleanup = async (signal: string) => {
+            console.log(`[MilvusDB] 🛑 ${signal} received: releasing all collections...`);
+
+            if (this.idleCheckInterval) {
+                clearInterval(this.idleCheckInterval);
+            }
+
+            try {
+                await this.releaseAllCollections();
+                console.log(`[MilvusDB] ✅ All collections released, exiting...`);
+            } catch (error) {
+                console.error(`[MilvusDB] ❌ Error during cleanup:`, error);
+            }
+        };
+
+        process.on('SIGTERM', () => cleanup('SIGTERM'));
+        process.on('SIGINT', () => cleanup('SIGINT'));
+        process.on('beforeExit', () => cleanup('beforeExit'));
+
+        this.shutdownHooksRegistered = true;
+        console.log(`[MilvusDB] 🔌 Shutdown hooks registered for collection cleanup`);
+    }
+
+    /**
+     * Check and release collections that have been idle too long
+     */
+    private async releaseIdleCollections(): Promise<void> {
+        const now = Date.now();
+        const collectionsToRelease: string[] = [];
+
+        for (const [collection, lastAccess] of this.lastAccessTime) {
+            if (now - lastAccess > this.idleTimeoutMs) {
+                collectionsToRelease.push(collection);
+            }
+        }
+
+        for (const collection of collectionsToRelease) {
+            console.log(`[MilvusDB] ⏱️  Collection '${collection}' idle for ${Math.round((now - this.lastAccessTime.get(collection)!) / 60000)} minutes, releasing...`);
+            await this.releaseCollection(collection);
+            this.lastAccessTime.delete(collection);
+        }
+    }
+
+    /**
+     * Release a collection from memory to free RAM
+     * Data remains on disk and can be reloaded later
+     */
+    async releaseCollection(collectionName: string): Promise<void> {
+        await this.ensureInitialized();
+
+        if (!this.client) {
+            throw new Error('MilvusClient is not initialized');
+        }
+
+        try {
+            const result = await this.client.getLoadState({
+                collection_name: collectionName
+            });
+
+            if (result.state === LoadState.LoadStateLoaded) {
+                console.log(`[MilvusDB] 🔓 Releasing collection '${collectionName}' from memory...`);
+                await this.client.releaseCollection({
+                    collection_name: collectionName,
+                });
+                console.log(`[MilvusDB] ✅ Collection '${collectionName}' released from memory`);
+            }
+        } catch (error) {
+            console.error(`[MilvusDB] ❌ Failed to release collection '${collectionName}':`, error);
+        }
+    }
+
+    /**
+     * Release all loaded collections from memory
+     */
+    async releaseAllCollections(): Promise<void> {
+        await this.ensureInitialized();
+
+        try {
+            const collections = await this.listCollections();
+            console.log(`[MilvusDB] 🔓 Releasing ${collections.length} collections from memory...`);
+
+            for (const collection of collections) {
+                await this.releaseCollection(collection);
+            }
+
+            this.lastAccessTime.clear();
+            console.log(`[MilvusDB] ✅ All collections released`);
+        } catch (error) {
+            console.error(`[MilvusDB] ❌ Failed to release all collections:`, error);
+        }
+    }
+
+    /**
+     * Track collection access time (called after operations)
+     */
+    protected trackAccess(collectionName: string): void {
+        this.lastAccessTime.set(collectionName, Date.now());
     }
 
     /**
@@ -371,6 +515,7 @@ export class MilvusVectorDatabase implements VectorDatabase {
     async search(collectionName: string, queryVector: number[], options?: SearchOptions): Promise<VectorSearchResult[]> {
         await this.ensureInitialized();
         await this.ensureLoaded(collectionName);
+        this.trackAccess(collectionName); // Track for idle timeout
 
         if (!this.client) {
             throw new Error('MilvusClient is not initialized after ensureInitialized().');
@@ -383,7 +528,7 @@ export class MilvusVectorDatabase implements VectorDatabase {
             output_fields: ['id', 'content', 'relativePath', 'startLine', 'endLine', 'fileExtension', 'metadata'],
         };
 
-        // Apply boolean expression filter if provided (e.g., fileExtension in [".ts",".py"]) 
+        // Apply boolean expression filter if provided (e.g., fileExtension in [".ts",".py"])
         if (options?.filterExpr && options.filterExpr.trim().length > 0) {
             searchParams.expr = options.filterExpr;
         }
@@ -426,6 +571,7 @@ export class MilvusVectorDatabase implements VectorDatabase {
     async query(collectionName: string, filter: string, outputFields: string[], limit?: number): Promise<Record<string, any>[]> {
         await this.ensureInitialized();
         await this.ensureLoaded(collectionName);
+        this.trackAccess(collectionName); // Track for idle timeout
 
         if (!this.client) {
             throw new Error('MilvusClient is not initialized after ensureInitialized().');
@@ -613,6 +759,7 @@ export class MilvusVectorDatabase implements VectorDatabase {
     async hybridSearch(collectionName: string, searchRequests: HybridSearchRequest[], options?: HybridSearchOptions): Promise<HybridSearchResult[]> {
         await this.ensureInitialized();
         await this.ensureLoaded(collectionName);
+        this.trackAccess(collectionName); // Track for idle timeout
 
         if (!this.client) {
             throw new Error('MilvusClient is not initialized after ensureInitialized().');
