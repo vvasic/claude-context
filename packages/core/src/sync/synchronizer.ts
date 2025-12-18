@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { MerkleDAG } from './merkle';
 import * as os from 'os';
+import { minimatch } from 'minimatch';
 
 export class FileSynchronizer {
     private fileHashes: Map<string, string>;
@@ -95,6 +96,17 @@ export class FileSynchronizer {
         return fileHashes;
     }
 
+    /**
+     * Check if a path should be ignored based on gitignore-style patterns.
+     *
+     * Gitignore pattern semantics:
+     * - Leading `/` means root-relative (only matches at repository root)
+     * - Trailing `/` means directory-only pattern (matches dir and all contents)
+     * - `**` matches any number of directories
+     * - `*` matches anything except `/`
+     * - No `/` in pattern means match anywhere in path
+     * - `/` in middle of pattern means path pattern (match from root or anywhere)
+     */
     private shouldIgnore(relativePath: string, isDirectory: boolean = false): boolean {
         // Always ignore hidden files and directories (starting with .)
         const pathParts = relativePath.split(path.sep);
@@ -106,90 +118,106 @@ export class FileSynchronizer {
             return false;
         }
 
-        // Normalize path separators and remove leading/trailing slashes
+        // Normalize path: use forward slashes, remove leading/trailing slashes
         const normalizedPath = relativePath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
 
         if (!normalizedPath) {
             return false; // Don't ignore root
         }
 
-        // Check direct pattern matches first
-        for (const pattern of this.ignorePatterns) {
-            if (this.matchPattern(normalizedPath, pattern, isDirectory)) {
-                return true;
-            }
-        }
+        // For directories, also check if path with trailing slash matches
+        const pathToCheck = isDirectory ? normalizedPath + '/' : normalizedPath;
 
-        // Check if any parent directory is ignored
-        const normalizedPathParts = normalizedPath.split('/');
-        for (let i = 0; i < normalizedPathParts.length; i++) {
-            const partialPath = normalizedPathParts.slice(0, i + 1).join('/');
-            for (const pattern of this.ignorePatterns) {
-                // Check directory patterns
-                if (pattern.endsWith('/')) {
-                    const dirPattern = pattern.slice(0, -1);
-                    if (this.simpleGlobMatch(partialPath, dirPattern) ||
-                        this.simpleGlobMatch(normalizedPathParts[i], dirPattern)) {
-                        return true;
-                    }
-                }
-                // Check exact path patterns
-                else if (pattern.includes('/')) {
-                    if (this.simpleGlobMatch(partialPath, pattern)) {
-                        return true;
-                    }
-                }
-                // Check filename patterns against any path component
-                else {
-                    if (this.simpleGlobMatch(normalizedPathParts[i], pattern)) {
-                        return true;
-                    }
-                }
+        for (const rawPattern of this.ignorePatterns) {
+            if (this.matchGitignorePattern(normalizedPath, pathToCheck, rawPattern, isDirectory)) {
+                return true;
             }
         }
 
         return false;
     }
 
-    private matchPattern(filePath: string, pattern: string, isDirectory: boolean = false): boolean {
-        // Clean both path and pattern
-        const cleanPath = filePath.replace(/^\/+|\/+$/g, '');
-        const cleanPattern = pattern.replace(/^\/+|\/+$/g, '');
+    /**
+     * Match a path against a gitignore-style pattern using minimatch.
+     */
+    private matchGitignorePattern(
+        normalizedPath: string,
+        pathWithSlash: string,
+        rawPattern: string,
+        isDirectory: boolean
+    ): boolean {
+        if (!rawPattern || rawPattern.startsWith('#')) {
+            return false; // Empty or comment
+        }
 
-        if (!cleanPath || !cleanPattern) {
+        let pattern = rawPattern.trim();
+        if (!pattern) return false;
+
+        // Handle negation patterns (we don't support them, but don't crash)
+        if (pattern.startsWith('!')) {
             return false;
         }
 
-        // Handle directory patterns (ending with /)
-        if (pattern.endsWith('/')) {
-            if (!isDirectory) return false; // Directory pattern only matches directories
-            const dirPattern = cleanPattern.slice(0, -1);
+        const isRootRelative = pattern.startsWith('/');
+        const isDirectoryPattern = pattern.endsWith('/');
 
-            // Direct match or any path component matches
-            return this.simpleGlobMatch(cleanPath, dirPattern) ||
-                cleanPath.split('/').some(part => this.simpleGlobMatch(part, dirPattern));
+        // Remove leading slash for matching (we handle root-relative separately)
+        if (isRootRelative) {
+            pattern = pattern.slice(1);
         }
 
-        // Handle path patterns (containing /)
-        if (cleanPattern.includes('/')) {
-            return this.simpleGlobMatch(cleanPath, cleanPattern);
+        // Remove trailing slash for matching
+        if (isDirectoryPattern) {
+            pattern = pattern.slice(0, -1);
         }
 
-        // Handle filename patterns (no /) - match against basename
-        const fileName = path.basename(cleanPath);
-        return this.simpleGlobMatch(fileName, cleanPattern);
-    }
+        // If pattern doesn't contain '/', it should match anywhere in the path
+        const hasSlash = pattern.includes('/');
 
-    private simpleGlobMatch(text: string, pattern: string): boolean {
-        if (!text || !pattern) return false;
+        const minimatchOpts = { dot: false, nocase: false, matchBase: !hasSlash && !isRootRelative };
 
-        // Convert glob pattern to regex
-        const regexPattern = pattern
-            .replace(/[.+^${}()|[\]\\]/g, '\\$&') // Escape regex special chars except *
-            .replace(/\*/g, '.*'); // Convert * to .*
+        // For directory patterns, we need to match:
+        // 1. The directory itself
+        // 2. Any file/directory inside it
+        if (isDirectoryPattern) {
+            // Match the directory itself
+            if (isDirectory) {
+                if (minimatch(normalizedPath, pattern, minimatchOpts)) {
+                    return true;
+                }
+                // Also try with ** for nested matches if not root-relative
+                if (!isRootRelative && minimatch(normalizedPath, '**/' + pattern, minimatchOpts)) {
+                    return true;
+                }
+            }
+            // Match anything inside the directory
+            const dirGlob = pattern + '/**';
+            if (minimatch(normalizedPath, dirGlob, minimatchOpts)) {
+                return true;
+            }
+            if (!isRootRelative && minimatch(normalizedPath, '**/' + dirGlob, minimatchOpts)) {
+                return true;
+            }
+            return false;
+        }
 
-        const regex = new RegExp(`^${regexPattern}$`);
-        return regex.test(text);
+        // For root-relative patterns (started with /), only match from root
+        if (isRootRelative) {
+            return minimatch(normalizedPath, pattern, minimatchOpts);
+        }
+
+        // For patterns with /, they can match from root or as a suffix
+        if (hasSlash) {
+            // Try exact match from root
+            if (minimatch(normalizedPath, pattern, minimatchOpts)) {
+                return true;
+            }
+            // Try as suffix with **/ prefix
+            return minimatch(normalizedPath, '**/' + pattern, minimatchOpts);
+        }
+
+        // Pattern without slash: match basename anywhere using matchBase option
+        return minimatch(normalizedPath, pattern, minimatchOpts);
     }
 
     private buildMerkleDAG(fileHashes: Map<string, string>): MerkleDAG {
