@@ -13,7 +13,7 @@ export {
 
 // Implementation class exports
 export { MilvusRestfulVectorDatabase, MilvusRestfulConfig, MilvusRestfulMemoryConfig } from './milvus-restful-vectordb';
-export { MilvusVectorDatabase, MilvusConfig, MilvusMemoryConfig } from './milvus-vectordb';
+export { MilvusVectorDatabase, MilvusConfig, MilvusMemoryConfig, CollectionMemoryStatus } from './milvus-vectordb';
 export {
     ClusterManager,
     ZillizConfig,

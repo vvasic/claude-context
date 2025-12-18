@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
-import { Context, COLLECTION_LIMIT_MESSAGE } from "@zilliz/claude-context-core";
+import { Context, COLLECTION_LIMIT_MESSAGE, MilvusVectorDatabase } from "@zilliz/claude-context-core";
 import { SnapshotManager } from "./snapshot.js";
 import { ensureAbsolutePath, truncateContent, trackCodebasePath } from "./utils.js";
 
@@ -443,8 +443,8 @@ export class ToolHandlers {
         const resultLimit = limit || 10;
 
         try {
-            // Sync indexed codebases from cloud first
-            await this.syncIndexedCodebasesFromCloud();
+            // NOTE: Removed syncIndexedCodebasesFromCloud() - it loads ALL collections into memory
+            // Sync only happens on index/clear operations, not on every search
 
             // Force absolute path resolution - warn if relative path provided
             const absolutePath = ensureAbsolutePath(codebasePath);
@@ -819,6 +819,156 @@ export class ToolHandlers {
                 content: [{
                     type: "text",
                     text: `Error getting indexing status: ${error.message || error}`
+                }],
+                isError: true
+            };
+        }
+    }
+
+    /**
+     * Get memory status for all Milvus collections
+     */
+    public async handleGetMemoryStatus() {
+        try {
+            const vectorDb = this.context.getVectorDatabase();
+
+            // Check if it's a MilvusVectorDatabase with getMemoryStatus method
+            if (!('getMemoryStatus' in vectorDb)) {
+                return {
+                    content: [{
+                        type: "text",
+                        text: "Memory status is only available for Milvus vector database."
+                    }],
+                    isError: true
+                };
+            }
+
+            const statuses = await (vectorDb as MilvusVectorDatabase).getMemoryStatus();
+
+            if (statuses.length === 0) {
+                return {
+                    content: [{
+                        type: "text",
+                        text: "No collections found in Milvus."
+                    }]
+                };
+            }
+
+            const loadedCount = statuses.filter(s => s.loaded).length;
+            const trackedCount = statuses.filter(s => s.tracked).length;
+
+            let message = `📊 **Milvus Memory Status**\n\n`;
+            message += `Collections: ${statuses.length} total, ${loadedCount} loaded, ${trackedCount} tracked for idle timeout\n\n`;
+
+            for (const status of statuses) {
+                const loadedIcon = status.loaded ? '🟢' : '⚪';
+                const trackedInfo = status.tracked
+                    ? ` (tracked, last access: ${status.lastAccessedSecondsAgo}s ago)`
+                    : ' (not tracked)';
+                message += `${loadedIcon} ${status.name}${status.loaded ? trackedInfo : ''}\n`;
+            }
+
+            message += `\n💡 Loaded collections consume memory. Use release_collection or release_all_collections to free memory.`;
+
+            return {
+                content: [{
+                    type: "text",
+                    text: message
+                }]
+            };
+        } catch (error: any) {
+            return {
+                content: [{
+                    type: "text",
+                    text: `Error getting memory status: ${error.message || error}`
+                }],
+                isError: true
+            };
+        }
+    }
+
+    /**
+     * Release a specific collection from memory
+     */
+    public async handleReleaseCollection(args: any) {
+        const { collection } = args;
+
+        if (!collection) {
+            return {
+                content: [{
+                    type: "text",
+                    text: "Error: collection name is required."
+                }],
+                isError: true
+            };
+        }
+
+        try {
+            const vectorDb = this.context.getVectorDatabase();
+
+            if (!('releaseCollection' in vectorDb)) {
+                return {
+                    content: [{
+                        type: "text",
+                        text: "Release collection is only available for Milvus vector database."
+                    }],
+                    isError: true
+                };
+            }
+
+            await (vectorDb as MilvusVectorDatabase).releaseCollection(collection);
+
+            return {
+                content: [{
+                    type: "text",
+                    text: `✅ Collection '${collection}' has been released from memory. Data remains on disk and will be reloaded on next search.`
+                }]
+            };
+        } catch (error: any) {
+            return {
+                content: [{
+                    type: "text",
+                    text: `Error releasing collection: ${error.message || error}`
+                }],
+                isError: true
+            };
+        }
+    }
+
+    /**
+     * Release all collections from memory
+     */
+    public async handleReleaseAllCollections() {
+        try {
+            const vectorDb = this.context.getVectorDatabase();
+
+            if (!('releaseAllCollections' in vectorDb)) {
+                return {
+                    content: [{
+                        type: "text",
+                        text: "Release all collections is only available for Milvus vector database."
+                    }],
+                    isError: true
+                };
+            }
+
+            // Get status before release
+            const statusesBefore = await (vectorDb as MilvusVectorDatabase).getMemoryStatus();
+            const loadedBefore = statusesBefore.filter(s => s.loaded).length;
+
+            await (vectorDb as MilvusVectorDatabase).releaseAllCollections();
+
+            return {
+                content: [{
+                    type: "text",
+                    text: `✅ Released ${loadedBefore} collection(s) from memory. All data remains on disk and will be reloaded on-demand when searched.`
+                }]
+            };
+        } catch (error: any) {
+            return {
+                content: [{
+                    type: "text",
+                    text: `Error releasing collections: ${error.message || error}`
                 }],
                 isError: true
             };

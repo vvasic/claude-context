@@ -23,6 +23,14 @@ export interface MilvusConfig {
 export interface MilvusMemoryConfig {
     idleTimeoutMinutes?: number;  // Default: 5 minutes
     releaseOnShutdown?: boolean;  // Default: true
+    releaseOnStartup?: boolean;   // Default: true - release all collections on startup for lazy loading
+}
+
+export interface CollectionMemoryStatus {
+    name: string;
+    loaded: boolean;
+    tracked: boolean;
+    lastAccessedSecondsAgo?: number;
 }
 
 export class MilvusVectorDatabase implements VectorDatabase {
@@ -35,6 +43,7 @@ export class MilvusVectorDatabase implements VectorDatabase {
     private idleTimeoutMs: number;
     private idleCheckInterval: NodeJS.Timeout | null = null;
     private releaseOnShutdown: boolean;
+    private releaseOnStartup: boolean;
     private shutdownHooksRegistered: boolean = false;
 
     constructor(config: MilvusConfig, memoryConfig?: MilvusMemoryConfig) {
@@ -43,9 +52,15 @@ export class MilvusVectorDatabase implements VectorDatabase {
         // Memory management config
         this.idleTimeoutMs = (memoryConfig?.idleTimeoutMinutes ?? 5) * 60 * 1000;
         this.releaseOnShutdown = memoryConfig?.releaseOnShutdown ?? true;
+        this.releaseOnStartup = memoryConfig?.releaseOnStartup ?? true;
 
         // Start initialization asynchronously without waiting
-        this.initializationPromise = this.initialize();
+        this.initializationPromise = this.initialize().then(async () => {
+            // Release all collections on startup for lazy loading mode
+            if (this.releaseOnStartup) {
+                await this.performStartupRelease();
+            }
+        });
 
         // Start memory management
         this.startIdleChecker();
@@ -239,6 +254,80 @@ export class MilvusVectorDatabase implements VectorDatabase {
         } catch (error) {
             console.error(`[MilvusDB] ❌ Failed to release all collections:`, error);
         }
+    }
+
+    /**
+     * Release all collections on startup (lazy loading mode)
+     * NOTE: Uses this.client directly to avoid circular dependency with ensureInitialized()
+     */
+    private async performStartupRelease(): Promise<void> {
+        if (!this.client) {
+            console.error(`[MilvusDB] ❌ Cannot perform startup release: client not initialized`);
+            return;
+        }
+
+        try {
+            // Use client directly to avoid calling ensureInitialized() which would deadlock
+            const result = await this.client.showCollections();
+            const collections = (result as any).collection_names || (result as any).collections || [];
+            let releasedCount = 0;
+
+            for (const collection of collections) {
+                const result = await this.client.getLoadState({
+                    collection_name: collection
+                });
+
+                if (result.state === LoadState.LoadStateLoaded) {
+                    await this.client.releaseCollection({
+                        collection_name: collection,
+                    });
+                    releasedCount++;
+                }
+            }
+
+            if (releasedCount > 0) {
+                console.log(`[MilvusDB] 🧹 Startup: Released ${releasedCount} collections (lazy loading mode)`);
+            } else {
+                console.log(`[MilvusDB] 🧹 Startup: No collections were loaded`);
+            }
+        } catch (error) {
+            console.error(`[MilvusDB] ❌ Failed to release collections on startup:`, error);
+        }
+    }
+
+    /**
+     * Get memory status for all collections
+     */
+    async getMemoryStatus(): Promise<CollectionMemoryStatus[]> {
+        await this.ensureInitialized();
+
+        if (!this.client) {
+            throw new Error('MilvusClient is not initialized');
+        }
+
+        const collections = await this.listCollections();
+        const statuses: CollectionMemoryStatus[] = [];
+        const now = Date.now();
+
+        for (const collection of collections) {
+            try {
+                const result = await this.client.getLoadState({
+                    collection_name: collection
+                });
+
+                const lastAccess = this.lastAccessTime.get(collection);
+                statuses.push({
+                    name: collection,
+                    loaded: result.state === LoadState.LoadStateLoaded,
+                    tracked: lastAccess !== undefined,
+                    lastAccessedSecondsAgo: lastAccess ? Math.round((now - lastAccess) / 1000) : undefined
+                });
+            } catch (error) {
+                console.error(`[MilvusDB] Failed to get status for ${collection}:`, error);
+            }
+        }
+
+        return statuses;
     }
 
     /**

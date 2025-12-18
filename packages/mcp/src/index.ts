@@ -221,6 +221,36 @@ This tool is versatile and can be used before completing various tasks to retrie
                             required: ["path"]
                         }
                     },
+                    {
+                        name: "get_memory_status",
+                        description: `Get memory status for all Milvus collections. Shows which collections are loaded in memory and their idle timeout tracking status. Use this to understand memory consumption.`,
+                        inputSchema: {
+                            type: "object",
+                            properties: {}
+                        }
+                    },
+                    {
+                        name: "release_collection",
+                        description: `Release a specific collection from Milvus memory to free RAM. The collection data remains on disk and will be automatically reloaded on next search.`,
+                        inputSchema: {
+                            type: "object",
+                            properties: {
+                                collection: {
+                                    type: "string",
+                                    description: "Name of the collection to release from memory"
+                                }
+                            },
+                            required: ["collection"]
+                        }
+                    },
+                    {
+                        name: "release_all_collections",
+                        description: `Release all collections from Milvus memory to free RAM. All data remains on disk and will be automatically reloaded on-demand when searched.`,
+                        inputSchema: {
+                            type: "object",
+                            properties: {}
+                        }
+                    },
                 ]
             };
         });
@@ -238,6 +268,12 @@ This tool is versatile and can be used before completing various tasks to retrie
                     return await this.toolHandlers.handleClearIndex(args);
                 case "get_indexing_status":
                     return await this.toolHandlers.handleGetIndexingStatus(args);
+                case "get_memory_status":
+                    return await this.toolHandlers.handleGetMemoryStatus();
+                case "release_collection":
+                    return await this.toolHandlers.handleReleaseCollection(args);
+                case "release_all_collections":
+                    return await this.toolHandlers.handleReleaseAllCollections();
 
                 default:
                     throw new Error(`Unknown tool: ${name}`);
