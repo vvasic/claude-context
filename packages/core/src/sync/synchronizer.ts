@@ -202,18 +202,46 @@ export class FileSynchronizer {
         }
 
         // For root-relative patterns (started with /), only match from root
+        // But also match files INSIDE if the pattern matches a directory
         if (isRootRelative) {
-            return minimatch(normalizedPath, pattern, minimatchOpts);
+            // Exact match
+            if (minimatch(normalizedPath, pattern, minimatchOpts)) {
+                return true;
+            }
+            // Also check if path is inside the pattern (pattern matches a parent dir)
+            // e.g., pattern "public/app" should match "public/app/bundle.js"
+            if (minimatch(normalizedPath, pattern + '/**', minimatchOpts)) {
+                return true;
+            }
+            return false;
         }
 
         // For patterns with /, they can match from root or as a suffix
         if (hasSlash) {
+            // Handle patterns ending with /** (e.g., build/**)
+            // These should match the directory itself AND contents
+            if (pattern.endsWith('/**')) {
+                const basePattern = pattern.slice(0, -3); // Remove /**
+                // Match the directory itself
+                if (minimatch(normalizedPath, basePattern, minimatchOpts)) {
+                    return true;
+                }
+            }
+
             // Try exact match from root
             if (minimatch(normalizedPath, pattern, minimatchOpts)) {
                 return true;
             }
+            // Try matching files inside
+            if (minimatch(normalizedPath, pattern + '/**', minimatchOpts)) {
+                return true;
+            }
             // Try as suffix with **/ prefix
-            return minimatch(normalizedPath, '**/' + pattern, minimatchOpts);
+            if (minimatch(normalizedPath, '**/' + pattern, minimatchOpts)) {
+                return true;
+            }
+            // Try as suffix with files inside
+            return minimatch(normalizedPath, '**/' + pattern + '/**', minimatchOpts);
         }
 
         // Pattern without slash: match basename anywhere using matchBase option
