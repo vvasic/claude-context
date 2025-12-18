@@ -81,6 +81,30 @@ const DEFAULT_IGNORE_PATTERNS = [
     '*.polyfills.js',
     '*.runtime.js',
     '*.map', // source map files
+
+    // Framework-specific build outputs
+    '.next/**',           // Next.js build
+    '.nuxt/**',           // Nuxt.js build
+    '.output/**',         // Nitro/Nuxt output
+    '.turbo/**',          // Turborepo cache
+    '.webpack/**',        // Webpack cache
+    '.parcel-cache/**',   // Parcel cache
+    '.svelte-kit/**',     // SvelteKit build
+    '.angular/**',        // Angular cache
+    'storybook-static/**', // Storybook build
+
+    // Webpack Hot Module Replacement (HMR) files
+    '*.hot-update.js',    // Webpack HMR JavaScript
+    '*.hot-update.json',  // Webpack HMR manifest
+    '*.hot-update.js.map', // Webpack HMR source maps
+
+    // Deployment platform outputs
+    '.vercel/**',         // Vercel build
+    '.netlify/**',        // Netlify build
+
+    // Public build directories
+    'public/build/**',    // Various frameworks
+
     'node_modules', '.git', '.svn', '.hg', 'build', 'dist', 'out',
     'target', '.vscode', '.idea', '__pycache__', '.pytest_cache',
     'coverage', '.nyc_output', 'logs', 'tmp', 'temp'
@@ -317,19 +341,22 @@ export class Context {
         progressCallback?: (progress: { phase: string; current: number; total: number; percentage: number }) => void
     ): Promise<{ added: number, removed: number, modified: number }> {
         const collectionName = this.getCollectionName(codebasePath);
-        const synchronizer = this.synchronizers.get(collectionName);
 
-        if (!synchronizer) {
-            // Load project-specific ignore patterns before creating FileSynchronizer
-            await this.loadIgnorePatterns(codebasePath);
+        // Always reload ignore patterns to pick up any changes to .gitignore etc.
+        await this.loadIgnorePatterns(codebasePath);
 
-            // To be safe, let's initialize if it's not there.
+        let currentSynchronizer = this.synchronizers.get(collectionName);
+
+        if (!currentSynchronizer) {
+            // Create new synchronizer with current ignore patterns
             const newSynchronizer = new FileSynchronizer(codebasePath, this.ignorePatterns);
             await newSynchronizer.initialize();
             this.synchronizers.set(collectionName, newSynchronizer);
+            currentSynchronizer = newSynchronizer;
+        } else {
+            // Update existing synchronizer's ignore patterns
+            currentSynchronizer.updateIgnorePatterns(this.ignorePatterns);
         }
-
-        const currentSynchronizer = this.synchronizers.get(collectionName)!;
 
         progressCallback?.({ phase: 'Checking for file changes...', current: 0, total: 100, percentage: 0 });
         const { added, removed, modified } = await currentSynchronizer.checkForChanges();

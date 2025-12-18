@@ -277,6 +277,15 @@ export class FileSynchronizer {
         return this.fileHashes.get(filePath);
     }
 
+    /**
+     * Update ignore patterns for this synchronizer.
+     * This allows refreshing patterns without recreating the synchronizer.
+     */
+    public updateIgnorePatterns(ignorePatterns: string[]): void {
+        this.ignorePatterns = ignorePatterns;
+        console.log(`[Synchronizer] Updated ignore patterns: ${ignorePatterns.length} patterns`);
+    }
+
     private async saveSnapshot(): Promise<void> {
         const merkleDir = path.dirname(this.snapshotPath);
         await fs.mkdir(merkleDir, { recursive: true });
