@@ -102,8 +102,15 @@ const DEFAULT_IGNORE_PATTERNS = [
     '.vercel/**',         // Vercel build
     '.netlify/**',        // Netlify build
 
-    // Public build directories
+    // Public build directories (common webpack/bundler outputs)
     'public/build/**',    // Various frameworks
+    'public/js/**',       // Compiled JavaScript
+    'public/css/**',      // Compiled CSS
+    'public/app/**',      // React/Vue app bundles
+    'public/assets/**',   // Generic asset builds
+    'public/dist/**',     // Distribution builds
+    'public/bundle/**',   // Bundle outputs
+    'public/chunks/**',   // Code-split chunks
 
     'node_modules', '.git', '.svn', '.hg', 'build', 'dist', 'out',
     'target', '.vscode', '.idea', '__pycache__', '.pytest_cache',
